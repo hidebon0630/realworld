@@ -1,43 +1,71 @@
 package main
 
 import (
-	"log"
-	"net"
+	"fmt"
+	"io/ioutil"
+	"math/big"
 	"net/http"
-	"net/rpc"
-	"net/rpc/jsonrpc"
+	"time"
 )
 
-// メソッドが属す構造体
-type Calculator int
+var html []byte
 
-// RPCで外部から呼ばれるメソッド
-func (c *Calculator) Multiply(args Args, result *int) error {
-	log.Printf("Multiply called: %d, %d\n", args.A, args.B)
-	*result = args.A * args.B
-	return nil
+// HTMLをブラウザに送信
+func handlerHtml(w http.ResponseWriter, r *http.Request) {
+	// Pusherにキャスト可能であればプッシュする
+	w.Header().Add("Content-Type", "text/html")
+	w.Write(html)
 }
 
-// 外部から呼ばれる時の引数
-type Args struct {
-	A, B int
+func handlerPrimeSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+		return
+	}
+	// 接続断の検知用にコンテキストを取得
+	ctx := r.Context()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	var num int64 = 1
+	for id := 1; id <= 100; id++ {
+		// 通信が切れても終了
+		select {
+		case <-ctx.Done():
+			fmt.Println("Connection closed from client")
+			return
+		default:
+			// do nothing
+		}
+		for {
+			num++
+			// 確率論的に素数を求める
+			if big.NewInt(num).ProbablyPrime(20) {
+				fmt.Println(num)
+				fmt.Fprintf(w, "data: {\"id\": %d, \number\": %d}\n\n", id, num)
+				flusher.Flush()
+				time.Sleep(time.Second)
+				break
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	// 100個超えたら送信終了
+	fmt.Println("Connection closed from server")
 }
 
 func main() {
-	calculator := new(Calculator)
-	server := rpc.NewServer()
-	server.Register(calculator)
-	http.Handle(rpc.DefaultRPCPath, server)
-	log.Println("start http listening :18888")
-	listener, err := net.Listen("tcp", ":18888")
+	var err error
+	html, err = ioutil.ReadFile("index.html")
 	if err != nil {
 		panic(err)
 	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go server.ServeCodec(jsonrpc.NewServerCodec(conn))
-	}
+	http.HandleFunc("/", handlerHtml)
+	http.HandleFunc("/prime", handlerPrimeSSE)
+	fmt.Println("start http listening :18888")
+	err = http.ListenAndServe(":18888", nil)
+	fmt.Println(err)
 }
